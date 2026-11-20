@@ -1,8 +1,7 @@
 """Deterministic negotiation tools.
 
-These run on the user's machine (they are Managed Agents *custom* tools): the
-agent decides when to call them, the CLI executes them here and sends the
-result back. Keeping the math local and deterministic means numbers in a
+These run on the user's machine: Claude decides when to call them, the agent
+loop executes them here and sends the result back. Keeping the math local and deterministic means numbers in a
 negotiation plan are computed, not guessed by the model.
 """
 
@@ -300,7 +299,6 @@ _NUM = {"type": "number"}
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
-        "type": "custom",
         "name": "analyze_bargaining_range",
         "description": (
             "Compute the ZOPA (zone of possible agreement) and a recommended opening anchor. "
@@ -322,7 +320,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "type": "custom",
         "name": "plan_concessions",
         "description": "Build a shrinking concession schedule from the opening position toward the target, never crossing walk-away.",
         "input_schema": {
@@ -337,7 +334,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "type": "custom",
         "name": "value_startup_equity",
         "description": "Estimate paper and risk-adjusted expected value of a startup equity grant (with dilution and vesting).",
         "input_schema": {
@@ -356,7 +352,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "type": "custom",
         "name": "compare_offers",
         "description": "Rank compensation or deal packages by annual, first-year and multi-year value.",
         "input_schema": {
@@ -385,7 +380,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "type": "custom",
         "name": "salary_counter",
         "description": "Suggest a salary counter-offer from the current offer, market percentiles and any competing offer.",
         "input_schema": {
@@ -401,7 +395,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "type": "custom",
         "name": "save_negotiation_brief",
         "description": "Save the final negotiation brief/script as a Markdown file on the user's machine. Call when the plan is ready.",
         "input_schema": {

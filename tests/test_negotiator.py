@@ -3,8 +3,10 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from negotiator import cli, tools
-from negotiator.setup_agent import RESEARCH_HOSTS, build_tools
+from anthropic.types.beta import BetaMessage
+
+from negotiator import tools
+from negotiator.agent import NegotiatorAgent, Printer, build_tools
 
 
 # ---------------- tools ----------------
@@ -95,70 +97,114 @@ def test_tool_definitions_match_functions():
     assert names == set(tools.TOOL_FUNCTIONS)
 
 
-def test_agent_tools_only_enable_web():
-    t = build_tools(RESEARCH_HOSTS)
-    toolset = t[0]
-    assert toolset["default_config"]["enabled"] is False
-    assert {c["name"] for c in toolset["configs"] if c["enabled"]} == {"web_search", "web_fetch"}
-    assert len(RESEARCH_HOSTS) <= 64
+def test_build_tools():
+    t = build_tools(web=True)
+    assert t[0]["type"] == "web_search_20260209"
+    assert all(x.get("eager_input_streaming") for x in t[1:])
+    assert all("type" not in x for x in t[1:])
+    assert all(x["type"] != "web_search_20260209" for x in build_tools(web=False) if "type" in x)
 
 
-# ---------------- event loop ----------------
+# ---------------- agent loop (Claude API faked) ----------------
+def make_message(content, stop_reason):
+    return BetaMessage.model_validate({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+        "content": content, "stop_reason": stop_reason, "stop_sequence": None,
+        "usage": {"input_tokens": 1000, "output_tokens": 100,
+                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+    })
+
+
 class FakeStream:
-    def __init__(self, events):
-        self.events = events
+    def __init__(self, msg):
+        self.msg = msg
 
     def __enter__(self):
-        return iter(self.events)
+        return self
 
     def __exit__(self, *a):
         return False
 
+    def __iter__(self):
+        for b in self.msg.content:
+            yield NS(type="content_block_start", content_block=b)
+            if b.type == "text":
+                yield NS(type="content_block_delta", delta=NS(type="text_delta", text=b.text))
+
+    def get_final_message(self):
+        return self.msg
+
 
 class FakeClient:
-    def __init__(self, events):
-        self.sent = []
-        events_api = NS(
-            stream=lambda session_id: FakeStream(events),
-            send=lambda session_id, events: self.sent.extend(events),
-        )
-        self.beta = NS(sessions=NS(events=events_api))
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+        def stream(**kw):
+            self.calls.append(json.loads(json.dumps(kw["messages"])))
+            return FakeStream(self.replies.pop(0))
+
+        self.beta = NS(messages=NS(stream=stream))
 
 
-def idle(reason):
-    return NS(type="session.status_idle", stop_reason=NS(type=reason))
+class Quiet(Printer):
+    def __init__(self):
+        self.out = []
+
+    def text(self, chunk):
+        self.out.append(chunk)
+
+    def status(self, msg):
+        self.out.append(f"[{msg}]")
 
 
-def test_run_turn_executes_custom_tool_and_stops_on_end_turn(capsys):
-    events = [
-        NS(type="agent.message", content=[NS(type="text", text="Let me compute.")]),
-        NS(type="agent.custom_tool_use", id="sevt_1", name="salary_counter",
-           input={"current_offer": 100_000}),
-        idle("requires_action"),
-        NS(type="agent.message", content=[NS(type="text", text="Counter at 109,750.")]),
-        idle("end_turn"),
-        NS(type="agent.message", content=[NS(type="text", text="SHOULD NOT PRINT")]),
-    ]
-    client = FakeClient(events)
-    assert cli.run_turn(client, "sesn_x", "hi") == "end_turn"
-    assert client.sent[0]["type"] == "user.message"
-    result = client.sent[1]
-    assert result["type"] == "user.custom_tool_result"
-    assert result["custom_tool_use_id"] == "sevt_1"
-    assert result["is_error"] is False
-    assert "recommended_counter" in result["content"][0]["text"]
-    out = capsys.readouterr().out
-    assert "Counter at 109,750." in out and "SHOULD NOT PRINT" not in out
+def test_send_runs_local_tool_then_finishes(tmp_path):
+    client = FakeClient([
+        make_message([{"type": "text", "text": "Computing."},
+                      {"type": "tool_use", "id": "toolu_1", "name": "salary_counter",
+                       "input": {"current_offer": 100000}}], "tool_use"),
+        make_message([{"type": "text", "text": "Counter at 109,750."}], "end_turn"),
+    ])
+    p = Quiet()
+    agent = NegotiatorAgent(client=client, session_id="t", printer=p, sessions_dir=tmp_path)
+    assert agent.send("hi") == "end_turn"
+
+    second = client.calls[1]
+    result = second[-1]["content"][0]
+    assert result["type"] == "tool_result" and result["tool_use_id"] == "toolu_1"
+    assert result["is_error"] is False and "recommended_counter" in result["content"]
+    assert "Counter at 109,750." in "".join(p.out)
+    assert agent.usage["input"] == 2000 and agent.cost_usd() > 0
+
+    # saved and resumable; next user text starts a new user turn
+    again = NegotiatorAgent.load("t", client=FakeClient([]), sessions_dir=tmp_path)
+    assert again.messages == agent.messages
+    assert [m["role"] for m in again.messages] == ["user", "assistant", "user", "assistant"]
 
 
-def test_run_turn_denies_flagged_call_without_input(monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(EOFError))
-    events = [
-        NS(type="agent.tool_use", id="sevt_2", name="web_fetch",
-           input={"url": "https://x"}, evaluated_permission="ask"),
-        idle("requires_action"),
-        idle("budget_reached"),
-    ]
-    client = FakeClient(events)
-    assert cli.run_turn(client, "s", "go") == "budget_reached"
-    assert client.sent[1] == {"type": "user.tool_confirmation", "tool_use_id": "sevt_2", "result": "deny"}
+def test_truncated_tool_call_is_not_run_and_history_stays_valid(tmp_path):
+    client = FakeClient([
+        make_message([{"type": "tool_use", "id": "toolu_9", "name": "save_negotiation_brief",
+                       "input": {"title": "x"}}], "max_tokens"),
+        make_message([{"type": "text", "text": "ok"}], "end_turn"),
+    ])
+    agent = NegotiatorAgent(client=client, session_id="t2", printer=Quiet(), sessions_dir=tmp_path)
+    assert agent.send("save it") == "max_tokens"
+    last = agent.messages[-1]
+    assert last["role"] == "user" and last["content"][0]["is_error"] is True
+    assert not (tmp_path / "briefs").exists()
+    # the next message merges into that user turn rather than making two user turns in a row
+    agent.send("continue")
+    roles = [m["role"] for m in client.calls[1]]
+    assert roles == ["user", "assistant", "user"]
+    assert client.calls[1][-1]["content"][-1] == {"type": "text", "text": "continue"}
+
+
+def test_pause_turn_resumes_without_extra_user_message(tmp_path):
+    client = FakeClient([
+        make_message([{"type": "text", "text": "Searching"}], "pause_turn"),
+        make_message([{"type": "text", "text": "Done"}], "end_turn"),
+    ])
+    agent = NegotiatorAgent(client=client, session_id="t3", printer=Quiet(), sessions_dir=tmp_path)
+    agent.send("research")
+    assert client.calls[1][-1]["role"] == "assistant"

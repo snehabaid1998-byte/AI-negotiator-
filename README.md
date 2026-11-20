@@ -11,53 +11,56 @@ local tools (ZOPA and anchor, concession ladder, salary counter, equity value,
 offer comparison), and writes a brief with a script, likely objections and a draft
 message. It can also **role-play your counterpart** so you can practice first.
 
-Built on **Claude Managed Agents** (beta) with `claude-opus-5-5`. Anthropic hosts
-the agent loop. The number-crunching tools run on your machine as custom tools.
+Everything runs **locally on your computer**: the agent loop, the calculators,
+your saved conversations and briefs. The only thing that leaves your machine is
+the call to the Claude API (`claude-opus-5-5`), which does the thinking and the
+web searches. No server, no hosted agent, no database.
 
 ## Setup
 
+1. Get an API key at **console.anthropic.com** (add a few dollars of credit under Billing, then **API Keys → Create Key**).
+2. Install and run (Python 3.10+):
+
 ```bash
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...      # or: ant auth login
-python -m negotiator.setup_agent         # one time: creates the agent + environment
-python -m negotiator                     # start chatting
+export ANTHROPIC_API_KEY=sk-ant-...      # Windows PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
+python -m negotiator
 ```
 
-`setup_agent` saves the agent and environment IDs to `.negotiator.json`. It creates
-them once and reuses them. Run it again with `--force` after you change the prompt or tools.
-
-Options:
+That's it. There's no separate setup step.
 
 | Command | What it does |
 |---|---|
 | `python -m negotiator --scenario salary` | Skip the menu (`deal`, `salary`, `startup`, `other`) |
-| `python -m negotiator --resume sesn_...` | Continue an earlier session |
-| `python -m negotiator --budget 2` | Hard spend cap for the session in USD (default $5) |
-| `python -m negotiator.setup_agent --allow-host www.autotrader.com` | Let web research use another site |
-| `python -m negotiator.setup_agent --no-web` | Turn off web research |
+| `python -m negotiator --list` | List saved conversations |
+| `python -m negotiator --resume 20261120-101500-salary` | Continue a saved conversation |
+| `python -m negotiator --no-web` | Don't search the web |
 
 In-chat commands: `/practice` (the agent plays your counterpart), `/debrief`
-(feedback on how you did), `/brief` (save the final brief to `./briefs/`), `/quit`.
+(feedback on how you did), `/brief` (save the final brief to `./briefs/`),
+`/cost` (estimated API spend so far), `/quit`.
 
 ## How it works
 
 ```
-you ⇄ negotiator/cli.py ──events──▶ Managed Agents session (Claude Opus 5.5)
-                ▲                         │  web_search / web_fetch (allow-listed sites)
-                └── custom tool results ◀─┘  custom tool calls → negotiator/tools.py
+you ⇄ cli.py ⇄ agent.py (loop, on your machine) ──▶ Claude API (model + web search)
+                    │
+                    ├─ tools.py        calculators, run locally
+                    ├─ sessions/*.json your conversations
+                    └─ briefs/*.md     saved negotiation briefs
 ```
 
-- `negotiator/prompts.py`: the coach's system prompt (intake, strategy principles, the three modes, ethics) and the scenario openers.
-- `negotiator/tools.py`: deterministic tools (`analyze_bargaining_range`, `plan_concessions`, `salary_counter`, `value_startup_equity`, `compare_offers`, `save_negotiation_brief`).
-- `negotiator/setup_agent.py`: creates the environment (limited networking, research sites only) and the agent. Shell and file tools are off. Only web search and fetch are on.
-- `negotiator/cli.py`: the chat loop. It streams events, runs custom tools, and asks you before any server tool call the platform flags.
+- `negotiator/agent.py`: the agent loop. It streams Claude's reply, runs any tool Claude asks for locally, sends the result back, and repeats until the turn is done. It saves the conversation after every turn.
+- `negotiator/tools.py`: deterministic calculators (`analyze_bargaining_range`, `plan_concessions`, `salary_counter`, `value_startup_equity`, `compare_offers`, `save_negotiation_brief`).
+- `negotiator/prompts.py`: the coach's instructions and the scenario openers.
+- `negotiator/cli.py`: the terminal chat.
 
-## Cost and data
+## Cost and privacy
 
-Managed Agents is in beta. It bills session runtime (about $0.08/hour) on top of
-tokens and web searches. Each session has a hard spend cap (`--budget`). Session
-history is kept on Anthropic's side until you delete it. You can view sessions in
-the Claude Console.
+You pay only for API usage: about $4 per million input tokens and $20 per million
+output tokens, plus $10 per 1,000 web searches. A typical coaching chat costs
+cents to a dollar or so. Check with `/cost`. Conversations are stored only in
+`./sessions/` on your machine. Delete the files to erase them.
 
 The coach helps you negotiate honestly. It won't fabricate offers or deadlines. It
 is not legal, tax or financial advice.
